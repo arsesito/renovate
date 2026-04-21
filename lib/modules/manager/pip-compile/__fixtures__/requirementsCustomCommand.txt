@@ -12,7 +12,7 @@ idna==3.6
     # via requests
 markupsafe==2.1.4
     # via jinja2
-requests==2.31.0
+requests==2.33.0
     # via -r requirements.in
 urllib3==2.1.0
     # via requests
