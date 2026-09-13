@@ -1,4 +1,4 @@
-import { join } from 'upath';
+import upath from 'upath';
 import { mockDeep } from 'vitest-mock-extended';
 import { GlobalConfig } from '../../../config/global';
 import type { RepoGlobalConfig } from '../../../config/types';
@@ -30,9 +30,9 @@ const upgrades: Upgrade[] = [
 ];
 
 const adminConfig: RepoGlobalConfig = {
-  localDir: join('/tmp/github/some/repo'),
-  cacheDir: join('/tmp/cache'),
-  containerbaseDir: join('/tmp/renovate/cache/containerbase'),
+  localDir: upath.join('/tmp/github/some/repo'),
+  cacheDir: upath.join('/tmp/cache'),
+  containerbaseDir: upath.join('/tmp/renovate/cache/containerbase'),
   allowScripts: false,
 };
 
@@ -82,6 +82,35 @@ describe('modules/manager/copier/artifacts', () => {
         },
       ]);
       expect(execSnapshots).toEqual([]);
+    });
+
+    it('uses newValue for vcs-ref when both newValue and newVersion are provided', async () => {
+      const execSnapshots = mockExecAll();
+
+      const upgradeWithPrefixedTag = [
+        {
+          depName: 'https://github.com/foo/bar',
+          currentValue: 'foobar-v1.0.0',
+          newValue: 'foobar-v1.2.3',
+          newVersion: '1.2.3',
+        },
+      ];
+
+      await updateArtifacts({
+        packageFileName: '.copier-answers.yml',
+        updatedDeps: upgradeWithPrefixedTag,
+        newPackageFileContent: '',
+        config: {},
+      });
+
+      expect(execSnapshots).toMatchObject([
+        {
+          cmd: 'copier update --skip-answered --defaults --answers-file .copier-answers.yml --vcs-ref foobar-v1.2.3',
+          options: {
+            cwd: '/tmp/github/some/repo',
+          },
+        },
+      ]);
     });
 
     it('reports an error if no upgrade is specified', async () => {
@@ -414,6 +443,7 @@ describe('modules/manager/copier/artifacts', () => {
         newPackageFileContent: '',
         config,
       });
+
       expect(logger.debug).toHaveBeenCalledWith(
         {
           depName: 'https://github.com/foo/bar',

@@ -1,5 +1,6 @@
 import type { PlatformId } from '../constants';
 import type { LogLevelRemap } from '../logger/types';
+import type { ManagerName } from '../manager-list.generated';
 import type { CustomManager } from '../modules/manager/custom/types';
 import type { RepoSortMethod, SortMethod } from '../modules/platform/types';
 import type { HostRule, SkipReason } from '../types';
@@ -93,6 +94,7 @@ export interface RenovateSharedConfig {
   semanticCommitScope?: string | null;
   semanticCommitType?: string;
   semanticCommits?: 'auto' | 'enabled' | 'disabled';
+  skipArtifactsUpdate?: boolean;
   stopUpdatingLabel?: string;
   suppressNotifications?: string[];
   timezone?: string;
@@ -116,6 +118,7 @@ export interface GlobalOnlyConfig {
   forceCli?: boolean;
   gitNoVerify?: GitNoVerifyOption[];
   gitPrivateKey?: string;
+  gitPrivateKeyPassphrase?: string;
   globalExtends?: string[];
   mergeConfidenceDatasources?: string[];
   mergeConfidenceEndpoint?: string;
@@ -130,6 +133,7 @@ export interface GlobalOnlyConfig {
   repositories?: RenovateRepository[];
   useCloudMetadataServices?: boolean;
   deleteConfigFile?: boolean;
+  deleteAdditionalConfigFile?: boolean;
 }
 
 // Config options used within the repository worker, but not user configurable
@@ -171,6 +175,8 @@ export interface RepoGlobalConfig {
   s3Endpoint?: string;
   s3PathStyle?: boolean;
   cachePrivatePackages?: boolean;
+  configFileNames?: string[];
+  ignorePrAuthor?: boolean;
 }
 
 export interface LegacyAdminConfig {
@@ -194,6 +200,8 @@ export type ExecutionMode = 'branch' | 'update';
 
 export interface PostUpgradeTasks {
   commands?: string[];
+  workingDirTemplate?: string;
+  dataFileTemplate?: string;
   fileFilters?: string[];
   executionMode: ExecutionMode;
 }
@@ -207,10 +215,14 @@ export type RenovateRepository =
   | {
       repository: string;
       secrets?: Record<string, string>;
+      variables?: Record<string, string>;
     };
 
 export type UseBaseBranchConfigType = 'merge' | 'none';
 export type ConstraintsFilter = 'strict' | 'none';
+export type MinimumReleaseAgeBehaviour =
+  | 'timestamp-required'
+  | 'timestamp-optional';
 
 export const allowedStatusCheckStrings = [
   'minimumReleaseAge',
@@ -233,6 +245,9 @@ export interface RenovateConfig
   reportPath?: string;
   reportType?: 'logging' | 'file' | 's3' | null;
   depName?: string;
+  /** user configurable base branch patterns*/
+  baseBranchPatterns?: string[];
+  /** computed base branch from patterns - for internal use only */
   baseBranches?: string[];
   commitBody?: string;
   useBaseBranchConfig?: UseBaseBranchConfigType;
@@ -268,6 +283,7 @@ export interface RenovateConfig
   dependencyDashboardFooter?: string;
   dependencyDashboardLabels?: string[];
   dependencyDashboardOSVVulnerabilitySummary?: 'none' | 'all' | 'unresolved';
+  dependencyDashboardReportAbandonment?: boolean;
   packageFile?: string;
   packageRules?: PackageRule[];
   postUpdateOptions?: string[];
@@ -295,6 +311,7 @@ export interface RenovateConfig
 
   fetchChangeLogs?: FetchChangeLogsOptions;
   secrets?: Record<string, string>;
+  variables?: Record<string, string>;
 
   constraints?: Record<string, string>;
   skipInstalls?: boolean | null;
@@ -314,9 +331,18 @@ export interface RenovateConfig
   branchTopic?: string;
   additionalBranchPrefix?: string;
   sharedVariableName?: string;
+  minimumGroupSize?: number;
+  configFileNames?: string[];
+  minimumReleaseAgeBehaviour?: MinimumReleaseAgeBehaviour;
 }
 
-const CustomDatasourceFormats = ['json', 'plain', 'yaml', 'html'] as const;
+const CustomDatasourceFormats = [
+  'html',
+  'json',
+  'plain',
+  'toml',
+  'yaml',
+] as const;
 export type CustomDatasourceFormats = (typeof CustomDatasourceFormats)[number];
 
 export interface CustomDatasourceConfig {
@@ -356,6 +382,21 @@ export type UpdateType =
   | 'bump'
   | 'replacement';
 
+// These are the update types which can have configuration
+export const UpdateTypesOptions = [
+  'major',
+  'minor',
+  'patch',
+  'pin',
+  'digest',
+  'pinDigest',
+  'lockFileMaintenance',
+  'rollback',
+  'replacement',
+] as const;
+
+export type UpdateTypeOptions = (typeof UpdateTypesOptions)[number];
+
 export type FetchChangeLogsOptions = 'off' | 'branch' | 'pr';
 
 export type MatchStringsStrategy = 'any' | 'recursive' | 'combination';
@@ -365,6 +406,7 @@ export type MergeStrategy =
   | 'fast-forward'
   | 'merge-commit'
   | 'rebase'
+  | 'rebase-merge'
   | 'squash';
 
 // TODO: Proper typings
@@ -402,6 +444,7 @@ export interface ValidationMessage {
 }
 
 export type AllowedParents =
+  | '.'
   | 'bumpVersions'
   | 'customDatasources'
   | 'customManagers'
@@ -409,7 +452,9 @@ export type AllowedParents =
   | 'logLevelRemap'
   | 'packageRules'
   | 'postUpgradeTasks'
-  | 'vulnerabilityAlerts';
+  | 'vulnerabilityAlerts'
+  | ManagerName
+  | UpdateTypeOptions;
 export interface RenovateOptionBase {
   /**
    * If true, the option can only be configured by people with access to the Renovate instance.
@@ -453,7 +498,7 @@ export interface RenovateOptionBase {
   advancedUse?: boolean;
 
   /**
-   * This is used to add depreciation message in the docs
+   * This is used to add a deprecation message in the docs
    */
   deprecationMsg?: string;
 
@@ -476,6 +521,15 @@ export interface RenovateOptionBase {
    * Platforms which support this option, leave undefined if all platforms support it.
    */
   supportedPlatforms?: PlatformId[];
+
+  /**
+   * Conditions that must be met for this option to be required.
+   */
+  requiredIf?: RenovateRequiredOption[];
+}
+
+export interface RenovateRequiredOption {
+  siblingProperties: { property: string; value: string }[];
 }
 
 export interface RenovateArrayOption<
@@ -566,6 +620,13 @@ export interface ConfigMigration {
 }
 
 export interface MigratedConfig {
+  /**
+   * Indicates whether there was a migration applied to the configuration.
+   *
+   * @returns
+   * `false` if the configuration does not need migrating, and `migratedConfig` can be ignored
+   * `true` if the configuration was migrated, and if so, `migratedConfig` should be used instead of the provided config
+   */
   isMigrated: boolean;
   migratedConfig: RenovateConfig;
 }
@@ -590,8 +651,8 @@ export interface ValidationResult {
 }
 
 export interface BumpVersionConfig {
-  bumpType: string;
+  bumpType?: string;
   filePatterns: string[];
   matchStrings: string[];
-  name: string | null;
+  name?: string;
 }

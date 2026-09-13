@@ -3,6 +3,7 @@ export const PLATFORM_HOST_TYPES = [
   'bitbucket',
   'bitbucket-server',
   'codecommit',
+  'forgejo',
   'gerrit',
   'gitea',
   'github',
@@ -19,6 +20,13 @@ export const GITEA_API_USING_HOST_TYPES = [
   'gitea-tags',
 ];
 
+export const FORGEJO_API_USING_HOST_TYPES = [
+  'forgejo',
+  'forgejo-changelog',
+  'forgejo-releases',
+  'forgejo-tags',
+];
+
 export const GITHUB_API_USING_HOST_TYPES = [
   'github',
   'github-releases',
@@ -28,6 +36,7 @@ export const GITHUB_API_USING_HOST_TYPES = [
   'hermit',
   'github-changelog',
   'conan',
+  // DEPRECATED: do not add additional datasource-specific entries here, if they use `api.github.com` to look up new versions
 ];
 
 export const GITLAB_API_USING_HOST_TYPES = [

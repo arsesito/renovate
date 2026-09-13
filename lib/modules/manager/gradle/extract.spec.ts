@@ -122,6 +122,72 @@ describe('modules/manager/gradle/extract', () => {
     ]);
   });
 
+  it('resolves versions in build.gradle.kts', async () => {
+    const fsMock = {
+      'build.gradle.kts': codeBlock`
+        object Versions {
+          const val RETROFIT = "2.9.0"
+          const val SPRING_BOOT = "3.5.5"
+          const val DETEKT_FORMATTING = "1.23.6"
+          const val SPRING_CLOUD = "4.2.1"
+        }
+        allprojects {
+          dependencies {
+              constraints {
+                  api("com.squareup.retrofit2:retrofit:\${Versions.RETROFIT}")
+              }
+
+              kapt(platform("org.springframework.boot:spring-boot-dependencies:\${Versions.SPRING_BOOT}"))
+
+              detektPlugins("io.gitlab.arturbosch.detekt:detekt-formatting:\${Versions.DETEKT_FORMATTING}")
+
+              implementation(
+                  platform(
+                      "org.springframework.cloud:spring-cloud-contract-dependencies:" +
+                          Versions.SPRING_CLOUD
+                  )
+              )
+              implementation(platform("org.springframework.boot:spring-boot-dependencies:\${Versions.SPRING_BOOT}"))
+          }
+      }
+        `,
+    };
+    mockFs(fsMock);
+
+    const res = await extractAllPackageFiles(
+      partial<ExtractConfig>(),
+      Object.keys(fsMock),
+    );
+    expect(res).toMatchObject([
+      {
+        packageFile: 'build.gradle.kts',
+        deps: [
+          {
+            depName: 'com.squareup.retrofit2:retrofit',
+            currentValue: '2.9.0',
+            sharedVariableName: 'Versions.RETROFIT',
+          },
+          {
+            depName: 'org.springframework.boot:spring-boot-dependencies',
+            currentValue: '3.5.5',
+            sharedVariableName: 'Versions.SPRING_BOOT',
+          },
+          {
+            depName: 'io.gitlab.arturbosch.detekt:detekt-formatting',
+            currentValue: '1.23.6',
+            sharedVariableName: 'Versions.DETEKT_FORMATTING',
+          },
+          {
+            depName:
+              'org.springframework.cloud:spring-cloud-contract-dependencies',
+            currentValue: '4.2.1',
+            sharedVariableName: 'Versions.SPRING_CLOUD',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('resolves cross-file Kotlin objects', async () => {
     const fsMock = {
       'buildSrc/src/main/kotlin/Deps.kt': codeBlock`
@@ -747,6 +813,70 @@ describe('modules/manager/gradle/extract', () => {
             {
               depName: 'foo.bar:protobuf-java',
               currentValue: '2.17.0',
+              registryUrls: ['https://artifactory.foo.bar/artifactory/test'],
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('exclusiveContent with repeated repository definition', async () => {
+      const fsMock = {
+        'build.gradle': codeBlock`
+          repositories {
+            google()
+            exclusiveContent {
+              forRepository {
+                maven {
+                  url "https://artifactory.foo.bar/artifactory/test"
+                }
+              }
+              filter {
+                includeGroup "some.dll"
+              }
+            }
+            exclusiveContent {
+              forRepository {
+                maven {
+                  url "https://artifactory.foo.bar/artifactory/test"
+                }
+              }
+              filter {
+                includeGroup "foo.bar"
+              }
+            }
+          }
+
+          dependencies {
+            implementation "com.google.protobuf:protobuf-java:2.17.1"
+            implementation "foo.bar:protobuf-java:2.17.0"
+            implementation "some.dll:dll-1:1.0.0"
+          }
+        `,
+      };
+      mockFs(fsMock);
+
+      const res = await extractAllPackageFiles(
+        partial<ExtractConfig>(),
+        Object.keys(fsMock),
+      );
+
+      expect(res).toMatchObject([
+        {
+          deps: [
+            {
+              depName: 'com.google.protobuf:protobuf-java',
+              currentValue: '2.17.1',
+              registryUrls: ['https://dl.google.com/android/maven2/'],
+            },
+            {
+              depName: 'foo.bar:protobuf-java',
+              currentValue: '2.17.0',
+              registryUrls: ['https://artifactory.foo.bar/artifactory/test'],
+            },
+            {
+              depName: 'some.dll:dll-1',
+              currentValue: '1.0.0',
               registryUrls: ['https://artifactory.foo.bar/artifactory/test'],
             },
           ],

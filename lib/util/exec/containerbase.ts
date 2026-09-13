@@ -40,6 +40,11 @@ const allToolConfig: Record<string, ToolConfig> = {
     packageName: 'containerbase/composer-prebuild',
     versioning: composerVersioningId,
   },
+  conan: {
+    datasource: 'pypi',
+    packageName: 'conan',
+    versioning: pep440VersioningId,
+  },
   copier: {
     datasource: 'pypi',
     packageName: 'copier',
@@ -107,13 +112,13 @@ const allToolConfig: Record<string, ToolConfig> = {
   },
   java: {
     datasource: 'java-version',
-    packageName: 'java',
+    packageName: 'java?system=true',
     versioning: npmVersioningId,
   },
   /* not used in Renovate */
   'java-maven': {
     datasource: 'java-version',
-    packageName: 'java',
+    packageName: 'java?system=true',
     versioning: mavenVersioningId,
   },
   jb: {

@@ -9,7 +9,6 @@ import { HttpError } from '../../../util/http';
 import { memCacheProvider } from '../../../util/http/cache/memory-http-cache-provider';
 import type { HttpResponse } from '../../../util/http/types';
 import { hasKey } from '../../../util/object';
-import { regEx } from '../../../util/regex';
 import { type AsyncResult, Result } from '../../../util/result';
 import { isDockerDigest } from '../../../util/string-match';
 import { asTimestamp } from '../../../util/timestamp';
@@ -86,7 +85,7 @@ export class DockerDatasource extends Datasource {
 
   override readonly releaseTimestampSupport = true;
   override readonly releaseTimestampNote =
-    'The release timestamp is determined from the `tag_last_pushed` field in the results.';
+    'Only supported on Docker Hub: The release timestamp is determined from the `tag_last_pushed` field in the results. **NOTE**: Currently, digests will receive the same release timestamp as the `tag_last_pushed`, which means that digests may appear newer than they are - see https://github.com/renovatebot/renovate/issues/38659';
   override readonly sourceUrlSupport = 'package';
   override readonly sourceUrlNote =
     'The source URL is determined from the `org.opencontainers.image.source` and `org.label-schema.vcs-url` labels present in the metadata of the **latest stable** image found on the Docker registry.';
@@ -670,7 +669,14 @@ export class DockerDatasource extends Datasource {
       return null;
     }
     let page = 0;
-    const pages = GlobalConfig.get('dockerMaxPages', 20);
+    const hostsNeedingAllPages = [
+      'https://ghcr.io', // GHCR sorts from oldest to newest, so we need to get all pages
+      'https://quay.io', // Quay sorts from oldest to newest, so we need to get all pages
+    ];
+    const pages = hostsNeedingAllPages.includes(registryHost)
+      ? 1000
+      : GlobalConfig.get('dockerMaxPages', 20);
+    logger.trace({ registryHost, dockerRepository, pages }, 'docker.getTags');
     let foundMaxResultsError = false;
     do {
       let res: HttpResponse<{ tags: string[] }>;
@@ -696,13 +702,21 @@ export class DockerDatasource extends Datasource {
       tags = tags.concat(res.body.tags);
       const linkHeader = parseLinkHeader(res.headers.link);
       if (isArtifactoryServer(res)) {
-        // Artifactory incorrectly returns a next link without the virtual repository name
-        // this is due to a bug in Artifactory https://jfrog.atlassian.net/browse/RTFACT-18971
-        url = linkHeader?.next?.last
-          ? `${url}&last=${linkHeader.next.last}`
-          : null;
+        // Artifactory bug: next link comes back without virtual-repo prefix (RTFACT-18971)
+        if (linkHeader?.next?.last) {
+          // parse the current URL, strip any old "last" param, then set the new one
+          const parsed: URL = new URL(url);
+          parsed.searchParams.delete('last');
+          parsed.searchParams.set('last', linkHeader.next.last);
+          url = parsed.href;
+        } else {
+          url = null;
+        }
+      } else if (linkHeader?.next?.url) {
+        // for the normal case we can still use URL to resolve relative-next
+        url = new URL(linkHeader.next.url, url).href;
       } else {
-        url = linkHeader?.next ? new URL(linkHeader.next.url, url).href : null;
+        url = null;
       }
       page += 1;
     } while (url && page < pages);
@@ -719,12 +733,24 @@ export class DockerDatasource extends Datasource {
     dockerRepository: string,
   ): Promise<string[] | null> {
     try {
-      const isQuay = regEx(/^https:\/\/quay\.io(?::[1-9][0-9]{0,4})?$/i).test(
-        registryHost,
-      );
+      const isQuay = registryHost === 'https://quay.io';
       let tags: string[] | null;
       if (isQuay) {
-        tags = await this.getTagsQuayRegistry(registryHost, dockerRepository);
+        try {
+          // Due to pagination and sorting limits on Quay Docker v2 API implementation we try the Quay v1 API first
+          tags = await this.getTagsQuayRegistry(registryHost, dockerRepository);
+        } catch (err) {
+          // If we get a 401 Unauthorized error (v1 API requires separate auth for private images), fall back to Docker v2 API
+          if (err.statusCode === 401) {
+            logger.debug(
+              { registryHost, dockerRepository },
+              'Quay v1 API unauthorized, falling back to Docker v2 API',
+            );
+            tags = await this.getDockerApiTags(registryHost, dockerRepository);
+          } else {
+            throw err;
+          }
+        }
       } else {
         tags = await this.getDockerApiTags(registryHost, dockerRepository);
       }
@@ -1016,6 +1042,13 @@ export class DockerDatasource extends Datasource {
         }
 
         if (newDigest) {
+          logger.once.debug(
+            {
+              documentationUrl:
+                'https://github.com/renovatebot/renovate/issues/38659',
+            },
+            'Using the `tag_last_pushed` to determine the age of a release from Docker Hub. If this is a digest update, it may lead to inconsistent behaviour, showing the digest as newer than it actually is',
+          );
           release.newDigest = newDigest;
         }
 

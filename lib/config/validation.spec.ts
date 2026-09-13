@@ -1,4 +1,4 @@
-import { configFileNames } from './app-strings';
+import { getConfigFileNames } from './app-strings';
 import { GlobalConfig } from './global';
 import type { RenovateConfig } from './types';
 import * as configValidation from './validation';
@@ -18,19 +18,37 @@ describe('config/validation', () => {
       expect(warnings).toMatchSnapshot();
     });
 
+    it('allow enabled field in vulnerabilityAlerts', async () => {
+      const config = {
+        vulnerabilityAlerts: {
+          enabled: false,
+        },
+      };
+      const { errors, warnings } = await configValidation.validateConfig(
+        'repo',
+        config,
+      );
+      expect(errors).toHaveLength(0);
+      expect(warnings).toHaveLength(0);
+    });
+
     it('catches global options in repo config', async () => {
       const config = {
         binarySource: 'something',
         username: 'user',
+        ignorePrAuthor: true,
       };
       const { warnings } = await configValidation.validateConfig(
         'repo',
         config,
       );
-      expect(warnings).toHaveLength(2);
+      expect(warnings).toHaveLength(3);
       expect(warnings).toMatchObject([
         {
           message: `The "binarySource" option is a global option reserved only for Renovate's global configuration and cannot be configured within a repository's config file.`,
+        },
+        {
+          message: `The "ignorePrAuthor" option is a global option reserved only for Renovate's global configuration and cannot be configured within a repository's config file.`,
         },
         {
           message: `The "username" option is a global option reserved only for Renovate's global configuration and cannot be configured within a repository's config file.`,
@@ -228,7 +246,7 @@ describe('config/validation', () => {
 
     it('validates matchBaseBranches', async () => {
       const config = {
-        baseBranches: ['foo'],
+        baseBranchPatterns: ['foo'],
         packageRules: [
           {
             matchBaseBranches: ['foo'],
@@ -244,7 +262,7 @@ describe('config/validation', () => {
       expect(warnings).toHaveLength(0);
     });
 
-    it('catches invalid matchBaseBranches when baseBranches is not defined', async () => {
+    it('catches invalid matchBaseBranches when baseBranchPatterns is not defined', async () => {
       const config = {
         packageRules: [
           {
@@ -372,15 +390,15 @@ describe('config/validation', () => {
       ]);
     });
 
-    it('catches invalid baseBranches regex', async () => {
+    it('catches invalid baseBranchPatterns regex', async () => {
       const config = {
-        baseBranches: ['/***$}{]][/', '/branch/i'],
+        baseBranchPatterns: ['/***$}{]][/', '/branch/i'],
       };
       const { errors } = await configValidation.validateConfig('repo', config);
       expect(errors).toEqual([
         {
           topic: 'Configuration Error',
-          message: 'Invalid regExp for baseBranches: `/***$}{]][/`',
+          message: 'Invalid regExp for baseBranchPatterns: `/***$}{]][/`',
         },
       ]);
     });
@@ -414,24 +432,6 @@ describe('config/validation', () => {
       expect(errors).toMatchSnapshot();
     });
 
-    it('included unsupported manager', async () => {
-      const config = {
-        packageRules: [
-          {
-            matchManagers: ['foo'],
-            enabled: true,
-          },
-        ],
-      };
-      const { warnings, errors } = await configValidation.validateConfig(
-        'repo',
-        config,
-      );
-      expect(warnings).toHaveLength(0);
-      expect(errors).toHaveLength(1);
-      expect(errors[0].message).toContain('ansible');
-    });
-
     it('included managers of the wrong type', async () => {
       const config = {
         packageRules: [
@@ -446,7 +446,7 @@ describe('config/validation', () => {
         config as any,
       );
       expect(warnings).toHaveLength(0);
-      expect(errors).toHaveLength(2);
+      expect(errors).toHaveLength(1);
       expect(errors).toMatchSnapshot();
     });
 
@@ -1096,10 +1096,23 @@ describe('config/validation', () => {
         'repo',
         config,
       );
-      expect(errors).toHaveLength(1);
-      expect(warnings).toHaveLength(1);
-      expect(errors).toMatchSnapshot();
-      expect(warnings).toMatchSnapshot();
+
+      expect(errors).toHaveLength(0);
+      expect(warnings).toHaveLength(2);
+      expect(warnings).toEqual([
+        {
+          topic: 'managerFilePatterns',
+          message: expect.toStartWith(
+            `"managerFilePatterns" can't be used in ".". Allowed objects: `,
+          ),
+        },
+        {
+          topic: 'npm.minor.managerFilePatterns',
+          message: expect.toStartWith(
+            `"managerFilePatterns" can't be used in "minor". Allowed objects: `,
+          ),
+        },
+      ]);
     });
 
     it('errors if manager objects are nested', async () => {
@@ -1738,7 +1751,7 @@ describe('config/validation', () => {
         );
         expect(warnings).toEqual([
           {
-            message: `Invalid value \`invalid\` for \`onboardingConfigFileName\`. The allowed values are ${configFileNames.join(', ')}.`,
+            message: `Invalid value \`invalid\` for \`onboardingConfigFileName\`. The allowed values are ${getConfigFileNames().join(', ')}.`,
             topic: 'Configuration Error',
           },
         ]);
@@ -1756,15 +1769,17 @@ describe('config/validation', () => {
           'global',
           config,
         );
+        expect.assertions(1);
         expect(warnings).toEqual([
-          {
-            message:
-              '"managerFilePatterns" may not be defined at the top level of a config and must instead be within a manager block',
-            topic: 'Config error',
-          },
           {
             topic: 'Configuration Error',
             message: `The "binarySource" option is a global option reserved only for Renovate's global configuration and cannot be configured within a repository's config file.`,
+          },
+          {
+            topic: 'managerFilePatterns',
+            message: expect.toStartWith(
+              `"managerFilePatterns" can't be used in ".". Allowed objects: `,
+            ),
           },
         ]);
       });
@@ -1786,9 +1801,10 @@ describe('config/validation', () => {
         );
         expect(warnings).toEqual([
           {
-            message:
-              '"managerFilePatterns" may not be defined at the top level of a config and must instead be within a manager block',
-            topic: 'Config error',
+            topic: 'managerFilePatterns',
+            message: expect.toStartWith(
+              `"managerFilePatterns" can't be used in ".". Allowed objects: `,
+            ),
           },
         ]);
       });
@@ -2120,7 +2136,7 @@ describe('config/validation', () => {
       expect(errors).toHaveLength(2);
     });
 
-    it('allow bumpVersion ', async () => {
+    it('allow bumpVersion', async () => {
       const config = partial<RenovateConfig>({
         bumpVersion: {
           filePatterns: ['foo'],

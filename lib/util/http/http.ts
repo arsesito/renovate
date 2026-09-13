@@ -13,10 +13,12 @@ import * as memCache from '../cache/memory';
 import { getEnv } from '../env';
 import { hash } from '../hash';
 import { type AsyncResult, Result } from '../result';
+import { Toml } from '../schema-utils';
 import { ObsoleteCacheHitLogger } from '../stats';
 import { isHttpUrl, parseUrl, resolveBaseUrl } from '../url';
 import { parseSingleYaml } from '../yaml';
 import { applyAuthorization, removeAuthorization } from './auth';
+import type { HttpCacheProvider } from './cache/types';
 import { fetch, stream } from './got';
 import { applyHostRule, findMatchingRule } from './host-rules';
 
@@ -65,7 +67,7 @@ export function applyDefaultHeaders(options: Options): void {
     ...options.headers,
     'user-agent':
       GlobalConfig.get('userAgent') ??
-      `RenovateBot/${renovateVersion} (https://github.com/renovatebot/renovate)`,
+      `Renovate/${renovateVersion} (https://github.com/renovatebot/renovate)`,
   };
 }
 
@@ -134,7 +136,10 @@ export abstract class HttpBase<
       { isMergeableObject: is.plainObject },
     );
 
-    logger.trace(`HTTP request: ${options.method.toUpperCase()} ${url}`);
+    const method = options.method.toLowerCase();
+    const isReadMethod = ['head', 'get'].includes(method);
+
+    logger.trace(`HTTP request: ${method.toUpperCase()} ${url}`);
 
     options.hooks = {
       beforeRedirect: [removeAuthorization],
@@ -142,10 +147,7 @@ export abstract class HttpBase<
 
     applyDefaultHeaders(options);
 
-    if (
-      is.undefined(options.readOnly) &&
-      ['head', 'get'].includes(options.method)
-    ) {
+    if (is.undefined(options.readOnly) && isReadMethod) {
       options.readOnly = true;
     }
 
@@ -158,22 +160,29 @@ export abstract class HttpBase<
     options = applyAuthorization(options);
     options.timeout ??= 60000;
 
-    const { cacheProvider } = options;
+    let cacheProvider: HttpCacheProvider | undefined;
+    if (isReadMethod && options.cacheProvider) {
+      cacheProvider = options.cacheProvider;
+    }
 
     const memCacheKey =
+      !process.env.RENOVATE_X_DISABLE_HTTP_MEMCACHE &&
       !cacheProvider &&
       options.memCache !== false &&
-      (options.method === 'get' || options.method === 'head')
+      isReadMethod
         ? hash(
             `got-${JSON.stringify({
               url,
               headers: options.headers,
-              method: options.method,
+              method,
             })}`,
           )
         : null;
 
-    const cachedResponse = await cacheProvider?.bypassServer<unknown>(url);
+    const cachedResponse = await cacheProvider?.bypassServer<unknown>(
+      method,
+      url,
+    );
     if (cachedResponse) {
       return cachedResponse;
     }
@@ -193,7 +202,7 @@ export abstract class HttpBase<
 
     if (!resPromise) {
       if (cacheProvider) {
-        await cacheProvider.setCacheHeaders(url, options);
+        await cacheProvider.setCacheHeaders(method, url, options);
       }
 
       const startTime = Date.now();
@@ -223,7 +232,7 @@ export abstract class HttpBase<
       resCopy.authorization = !!options?.headers?.authorization;
 
       if (cacheProvider) {
-        return await cacheProvider.wrapServerResponse(url, resCopy);
+        return await cacheProvider.wrapServerResponse(method, url, resCopy);
       }
 
       return resCopy;
@@ -234,6 +243,7 @@ export abstract class HttpBase<
       }
 
       const staleResponse = await cacheProvider?.bypassServer<string | Buffer>(
+        method,
         url,
         true,
       );
@@ -261,9 +271,9 @@ export abstract class HttpBase<
     throw err;
   }
 
-  protected resolveUrl(
+  resolveUrl(
     requestUrl: string | URL,
-    options: HttpOptions | undefined,
+    options: HttpOptions | undefined = undefined,
   ): URL {
     let url = requestUrl;
 
@@ -653,5 +663,44 @@ export abstract class HttpBase<
     combinedOptions = applyAuthorization(combinedOptions);
 
     return stream(resolvedUrl, combinedOptions);
+  }
+
+  async getToml<Schema extends ZodType<any, any, any>>(
+    url: string,
+    schema?: Schema,
+  ): Promise<HttpResponse<Infer<Schema>>>;
+  async getToml<Schema extends ZodType<any, any, any>>(
+    url: string,
+    options: JSONOpts,
+    schema: Schema,
+  ): Promise<HttpResponse<Infer<Schema>>>;
+  async getToml<Schema extends ZodType<any, any, any>>(
+    arg1: string,
+    arg2?: JSONOpts | Schema,
+    arg3?: Schema,
+  ): Promise<HttpResponse<Infer<Schema>>> {
+    const { url, schema, httpOptions } = this.resolveArgs<Infer<Schema>>(
+      arg1,
+      arg2,
+      arg3,
+    );
+
+    const opts: InternalHttpOptions = {
+      ...httpOptions,
+      method: 'get',
+      headers: {
+        'Content-Type': 'application/toml',
+        ...httpOptions?.headers,
+      },
+    };
+
+    const res = await this.getText(url, opts);
+    if (schema) {
+      res.body = await Toml.pipe(schema).parseAsync(res.body);
+    } else {
+      res.body = (await Toml.parseAsync(res.body)) as Infer<Schema>;
+    }
+
+    return res;
   }
 }

@@ -1,7 +1,7 @@
 import * as pep440 from '@renovatebot/pep440';
 import type { RangeStrategy } from '../../../types/versioning';
 import type { VersioningApi } from '../types';
-import { getNewValue, isLessThanRange } from './range';
+import { getNewValue, getPinnedValue, isLessThanRange } from './range';
 
 export const id = 'pep440';
 export const displayName = 'PEP440';
@@ -10,7 +10,6 @@ export const supportsRanges = true;
 export const supportedRangeStrategies: RangeStrategy[] = [
   'bump',
   'widen',
-  'pin',
   'replace',
 ];
 
@@ -81,7 +80,7 @@ function matches(version: string, range: string): boolean {
   if (isVersion(range)) {
     return equals(version, range);
   }
-  return isValid(range) && satisfies(version, range);
+  return isValid(range) && satisfies(version, range, { prereleases: true });
 }
 
 export const api: VersioningApi = {
@@ -99,6 +98,7 @@ export const api: VersioningApi = {
   getSatisfyingVersion,
   minSatisfyingVersion,
   getNewValue,
+  getPinnedValue,
   sortVersions,
   isLessThanRange,
 };

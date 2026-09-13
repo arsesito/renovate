@@ -648,7 +648,6 @@ describe('modules/platform/github/index', () => {
     it('should update fork when using forkToken and forkOrg', async () => {
       const scope = httpMock.scope(githubApiHost);
       forkInitRepoMock(scope, 'some/repo', true);
-      scope.patch('/repos/forked/repo/git/refs/heads/master').reply(200);
       const config = await github.initRepo({
         repository: 'some/repo',
         forkToken: 'true',
@@ -666,7 +665,6 @@ describe('modules/platform/github/index', () => {
       });
       scope.post('/repos/forked/repo/git/refs').reply(200);
       scope.patch('/repos/forked/repo').reply(200);
-      scope.patch('/repos/forked/repo/git/refs/heads/master').reply(200);
       const config = await github.initRepo({
         repository: 'some/repo',
         forkToken: 'true',
@@ -869,6 +867,10 @@ describe('modules/platform/github/index', () => {
     it('should detect repoForceRebase', async () => {
       httpMock
         .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(404);
+      httpMock
+        .scope(githubApiHost)
         .get('/repos/undefined/branches/main/protection')
         .reply(200, {
           required_pull_request_reviews: {
@@ -899,6 +901,10 @@ describe('modules/platform/github/index', () => {
     it('should handle 404', async () => {
       httpMock
         .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/dev')
+        .reply(404);
+      httpMock
+        .scope(githubApiHost)
         .get('/repos/undefined/branches/dev/protection')
         .reply(404);
       const res = await github.getBranchForceRebase('dev');
@@ -906,6 +912,10 @@ describe('modules/platform/github/index', () => {
     });
 
     it('should handle 403', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(404);
       httpMock
         .scope(githubApiHost)
         .get('/repos/undefined/branches/main/protection')
@@ -917,11 +927,194 @@ describe('modules/platform/github/index', () => {
     it('should throw 401', async () => {
       httpMock
         .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(404);
+      httpMock
+        .scope(githubApiHost)
         .get('/repos/undefined/branches/main/protection')
         .reply(401);
       await expect(
         github.getBranchForceRebase('main'),
       ).rejects.toThrowErrorMatchingSnapshot();
+    });
+
+    it('should return empty object when parentRepo is set', async () => {
+      const scope = httpMock.scope(githubApiHost);
+      forkInitRepoMock(scope, 'some/repo', false);
+      scope.get('/user').reply(200, {
+        login: 'forked',
+      });
+      scope.post('/repos/some/repo/forks').reply(200, {
+        full_name: 'forked/repo',
+        default_branch: 'master',
+      });
+      await github.initRepo({
+        repository: 'some/repo',
+        forkToken: 'fork-token',
+        forkCreation: true,
+      });
+
+      const res = await github.getBranchForceRebase('main');
+      expect(res).toBeFalse();
+    });
+
+    it('should ignore non_fast_forward ruleset for determining rebase', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(200, [
+          {
+            type: 'non_fast_forward',
+            ruleset_source_type: 'Repository',
+            ruleset_source: 'owner/repo',
+            ruleset_id: 12345,
+          },
+        ]);
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/branches/main/protection')
+        .reply(200, {
+          required_status_checks: {
+            strict: false,
+          },
+        });
+      const res = await github.getBranchForceRebase('main');
+      expect(res).toBeFalse();
+    });
+
+    it('should detect strict required status checks ruleset', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(200, [
+          {
+            type: 'required_status_checks',
+            parameters: {
+              strict_required_status_checks_policy: true,
+            },
+            ruleset_source_type: 'Repository',
+            ruleset_source: 'owner/repo',
+            ruleset_id: 12345,
+          },
+        ]);
+      const res = await github.getBranchForceRebase('main');
+      expect(res).toBeTrue();
+    });
+
+    it('should continue if no expected rulesets have been found', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(200, [
+          {
+            type: 'deletion',
+          },
+        ]);
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/branches/main/protection')
+        .reply(200, {
+          required_status_checks: {
+            strict: true,
+          },
+        });
+      const res = await github.getBranchForceRebase('main');
+      expect(res).toBeTrue();
+    });
+
+    it('should abort and throws on internal error', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(500);
+
+      await expect(github.getBranchForceRebase('main')).rejects.toThrow(
+        ExternalHostError,
+      );
+    });
+
+    it('should fallback to legacy branch protection when rulesets not found', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(404);
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/branches/main/protection')
+        .reply(200, {
+          required_status_checks: {
+            strict: true,
+          },
+        });
+      const res = await github.getBranchForceRebase('main');
+      expect(res).toBeTrue();
+    });
+
+    it('should return false when no force rebase rules found', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(200, [
+          {
+            type: 'pull_request',
+            parameters: {
+              required_approving_review_count: 1,
+            },
+            ruleset_source_type: 'Repository',
+            ruleset_source: 'owner/repo',
+            ruleset_id: 12345,
+          },
+        ]);
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/branches/main/protection')
+        .reply(404);
+      const res = await github.getBranchForceRebase('main');
+      expect(res).toBeFalse();
+    });
+
+    it('should return cached result on subsequent calls', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/main')
+        .reply(404);
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/branches/main/protection')
+        .reply(200, {
+          required_status_checks: {
+            strict: true,
+            contexts: [],
+          },
+        });
+
+      // First call should make HTTP request and cache the result
+      const firstResult = await github.getBranchForceRebase('main');
+      expect(firstResult).toBeTrue();
+
+      // Second call should return cached result without making HTTP request
+      // If cache is working, no additional HTTP requests should be made
+      const secondResult = await github.getBranchForceRebase('main');
+      expect(secondResult).toBeTrue();
+    });
+
+    it('should return cached false result on subsequent calls', async () => {
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/rules/branches/dev')
+        .reply(404);
+      httpMock
+        .scope(githubApiHost)
+        .get('/repos/undefined/branches/dev/protection')
+        .reply(404);
+
+      // First call should make HTTP request and cache the result
+      const firstResult = await github.getBranchForceRebase('dev');
+      expect(firstResult).toBeFalse();
+
+      // Second call should return cached result without making HTTP request
+      const secondResult = await github.getBranchForceRebase('dev');
+      expect(secondResult).toBeFalse();
     });
   });
 
@@ -1081,6 +1274,93 @@ describe('modules/platform/github/index', () => {
         expect(item.bodyStruct).toEqual({ hash: hashBody('foo') });
       });
     });
+
+    describe('PR author filtering', () => {
+      const renovatePr: GhRestPr = {
+        ...pr1,
+        number: 1,
+        head: {
+          ref: 'renovate-branch',
+          sha: '111' as LongCommitSha,
+          repo: { full_name: 'some/repo' },
+        },
+        title: 'Renovate PR',
+        user: { login: 'renovate-bot' },
+      };
+
+      const otherPr: GhRestPr = {
+        ...pr1,
+        number: 2,
+        head: {
+          ref: 'other-branch',
+          sha: '222' as LongCommitSha,
+          repo: { full_name: 'some/repo' },
+        },
+        title: 'Other PR',
+        user: { login: 'other-user' },
+      };
+
+      it('filters PRs by renovate username when no forkToken or ignorePrAuthor', async () => {
+        const scope = httpMock.scope(githubApiHost);
+        initRepoMock(scope, 'some/repo');
+        scope.get(pagePath(1)).reply(200, [renovatePr, otherPr]);
+        await github.initRepo({
+          repository: 'some/repo',
+          renovateUsername: 'renovate-bot',
+        });
+
+        const res = await github.getPrList();
+
+        expect(res).toHaveLength(1);
+        expect(res).toMatchObject([{ number: 1, title: 'Renovate PR' }]);
+      });
+
+      it('fetches all PRs when forkToken is set', async () => {
+        const scope = httpMock.scope(githubApiHost);
+        forkInitRepoMock(scope, 'some/repo', false);
+        scope.get('/user').reply(200, {
+          login: 'forked',
+        });
+        scope.post('/repos/some/repo/forks').reply(200, {
+          full_name: 'forked/repo',
+          default_branch: 'master',
+        });
+        scope.get(pagePath(1)).reply(200, [renovatePr, otherPr]);
+        await github.initRepo({
+          repository: 'some/repo',
+          renovateUsername: 'renovate-bot',
+          forkToken: 'some-token',
+          forkCreation: true,
+        });
+
+        const res = await github.getPrList();
+
+        expect(res).toHaveLength(2);
+        expect(res).toMatchObject([
+          { number: 2, title: 'Other PR' },
+          { number: 1, title: 'Renovate PR' },
+        ]);
+      });
+
+      it('fetches all PRs when ignorePrAuthor is set', async () => {
+        const scope = httpMock.scope(githubApiHost);
+        initRepoMock(scope, 'some/repo');
+        scope.get(pagePath(1)).reply(200, [renovatePr, otherPr]);
+        await github.initRepo({
+          repository: 'some/repo',
+          renovateUsername: 'renovate-bot',
+          ignorePrAuthor: true,
+        });
+
+        const res = await github.getPrList();
+
+        expect(res).toHaveLength(2);
+        expect(res).toMatchObject([
+          { number: 2, title: 'Other PR' },
+          { number: 1, title: 'Renovate PR' },
+        ]);
+      });
+    });
   });
 
   describe('getBranchPr(branchName)', () => {
@@ -1157,16 +1437,63 @@ describe('modules/platform/github/index', () => {
       await github.initRepo({ repository: 'some/repo' });
       vi.spyOn(branch, 'remoteBranchExists').mockResolvedValueOnce(false);
 
-      const pr = await github.tryReuseAutoclosedPr({
-        number: 91,
-        title: 'old title - autoclosed',
-        state: 'closed',
-        closedAt: DateTime.now().minus({ days: 6 }).toISO(),
-        sourceBranch: 'somebranch',
-        sha: '1234' as LongCommitSha,
-      });
+      const pr = await github.tryReuseAutoclosedPr(
+        {
+          number: 91,
+          title: 'old title - autoclosed',
+          state: 'closed',
+          closedAt: DateTime.now().minus({ days: 6 }).toISO(),
+          sourceBranch: 'somebranch',
+          sha: '1234' as LongCommitSha,
+        },
+        'new title',
+      );
 
       expect(pr).toMatchObject({ number: 91, sourceBranch: 'somebranch' });
+    });
+
+    it('force pushes when local SHA differs from PR SHA', async () => {
+      const scope = httpMock.scope(githubApiHost);
+      initRepoMock(scope, 'some/repo');
+      scope
+        .head('/repos/some/repo/git/commits/1234')
+        .reply(200)
+        .post('/repos/some/repo/git/refs')
+        .reply(201)
+        .patch('/repos/some/repo/pulls/91')
+        .reply(200, {
+          number: 91,
+          base: { sha: '1234' },
+          head: { ref: 'somebranch', repo: { full_name: 'some/repo' } },
+          state: 'open',
+          title: 'old title',
+          updated_at: '01-09-2022',
+        });
+      await github.initRepo({ repository: 'some/repo' });
+      vi.spyOn(branch, 'remoteBranchExists').mockResolvedValueOnce(false);
+      git.getBranchCommit.mockReturnValueOnce('5678' as LongCommitSha);
+
+      const pr = await github.tryReuseAutoclosedPr(
+        {
+          number: 91,
+          title: 'old title - autoclosed',
+          state: 'closed',
+          closedAt: DateTime.now().minus({ days: 6 }).toISO(),
+          sourceBranch: 'somebranch',
+          sha: '1234' as LongCommitSha,
+        },
+        'new title',
+      );
+
+      expect(pr).toMatchObject({
+        number: 91,
+        sourceBranch: 'somebranch',
+        sha: '5678',
+      });
+      expect(git.forcePushToRemote).toHaveBeenCalledExactlyOnceWith(
+        'somebranch',
+        'origin',
+      );
     });
 
     it('aborts reopening if branch recreation fails', async () => {
@@ -1183,14 +1510,17 @@ describe('modules/platform/github/index', () => {
 
       await github.initRepo({ repository: 'some/repo' });
 
-      const pr = await github.tryReuseAutoclosedPr({
-        number: 91,
-        title: 'old title - autoclosed',
-        state: 'closed',
-        closedAt: DateTime.now().minus({ days: 6 }).toISO(),
-        sourceBranch: 'somebranch',
-        sha: '1234' as LongCommitSha,
-      });
+      const pr = await github.tryReuseAutoclosedPr(
+        {
+          number: 91,
+          title: 'old title - autoclosed',
+          state: 'closed',
+          closedAt: DateTime.now().minus({ days: 6 }).toISO(),
+          sourceBranch: 'somebranch',
+          sha: '1234' as LongCommitSha,
+        },
+        'new title',
+      );
 
       expect(pr).toBeNull();
     });
@@ -1202,14 +1532,17 @@ describe('modules/platform/github/index', () => {
 
       await github.initRepo({ repository: 'some/repo' });
 
-      const pr = await github.tryReuseAutoclosedPr({
-        number: 91,
-        title: 'old title - autoclosed',
-        state: 'closed',
-        closedAt: DateTime.now().minus({ days: 6 }).toISO(),
-        sourceBranch: 'somebranch',
-        sha: '1234' as LongCommitSha,
-      });
+      const pr = await github.tryReuseAutoclosedPr(
+        {
+          number: 91,
+          title: 'old title - autoclosed',
+          state: 'closed',
+          closedAt: DateTime.now().minus({ days: 6 }).toISO(),
+          sourceBranch: 'somebranch',
+          sha: '1234' as LongCommitSha,
+        },
+        'new title',
+      );
 
       expect(pr).toBeNull();
     });
@@ -1577,6 +1910,7 @@ describe('modules/platform/github/index', () => {
       await github.initRepo({ repository: 'some/repo' });
       const res = await github.getIssue(1);
       expect(res).toBeNull();
+
       expect(logger.logger.debug).toHaveBeenCalledWith(
         'Issue #1 has been deleted',
       );
@@ -2945,8 +3279,7 @@ describe('modules/platform/github/index', () => {
         await github.initRepo({ repository: 'some/repo' });
         await github.createPr(prConfig);
 
-        expect(logger.logger.debug).toHaveBeenNthCalledWith(
-          10,
+        expect(logger.logger.debug).toHaveBeenCalledWith(
           { prNumber: 123 },
           'GitHub-native automerge: not supported on this version of GHE. Use 3.3.0 or newer.',
         );
@@ -2993,8 +3326,7 @@ describe('modules/platform/github/index', () => {
         await github.initRepo({ repository: 'some/repo' });
         await github.createPr(prConfig);
 
-        expect(logger.logger.debug).toHaveBeenNthCalledWith(
-          11,
+        expect(logger.logger.debug).toHaveBeenCalledWith(
           'GitHub-native automerge: success...PrNo: 123',
         );
       });
@@ -3110,6 +3442,7 @@ describe('modules/platform/github/index', () => {
           milestone: 1,
         });
         expect(pr?.number).toBe(123);
+
         expect(logger.logger.warn).toHaveBeenCalledWith(
           {
             err: {
@@ -3419,9 +3752,11 @@ describe('modules/platform/github/index', () => {
         .reply(200, pr);
 
       await expect(github.updatePr(pr)).toResolve();
+
       expect(logger.logger.debug).toHaveBeenCalledWith(
         `Adding labels 'new_label' to #1234`,
       );
+
       expect(logger.logger.debug).toHaveBeenCalledWith(
         `Deleting label old_label from #1234`,
       );
@@ -3434,6 +3769,7 @@ describe('modules/platform/github/index', () => {
           message: 'Failed to add labels',
         });
         await expect(github.addLabels(2, ['fail'])).toResolve();
+
         expect(logger.logger.warn).toHaveBeenCalledWith(
           {
             err: expect.any(Object),
@@ -3562,7 +3898,9 @@ describe('modules/platform/github/index', () => {
       await expect(github.reattemptPlatformAutomerge(pr)).toResolve();
 
       expect(logger.logger.warn).toHaveBeenCalledWith(
-        { err: new ExternalHostError(expect.any(RequestError), 'github') },
+        {
+          err: new ExternalHostError(expect.any(RequestError), 'github'),
+        },
         'Error re-attempting PR platform automerge',
       );
     });
@@ -3679,6 +4017,7 @@ describe('modules/platform/github/index', () => {
       });
 
       expect(mergeResult).toBeTrue();
+
       expect(logger.logger.warn).toHaveBeenCalledWith(
         'Fast-forward merge strategy is not supported by Github. Falling back to merge strategy set for the repository.',
       );
@@ -3697,6 +4036,7 @@ describe('modules/platform/github/index', () => {
       });
 
       expect(mergeResult).toBeTrue();
+
       expect(logger.logger.debug).toHaveBeenCalledWith(
         {
           options: {
@@ -3979,6 +4319,7 @@ describe('modules/platform/github/index', () => {
         ]);
       await github.initRepo({ repository: 'some/repo' });
       await github.getVulnerabilityAlerts();
+
       expect(logger.logger.debug).toHaveBeenCalledWith(
         { alerts: { 'npm/left-pad': { '0.0.2': '0.0.3' } } },
         'GitHub vulnerability details',
@@ -4016,6 +4357,91 @@ describe('modules/platform/github/index', () => {
       await github.initRepo({ repository: 'some/repo' });
       const res = await github.getVulnerabilityAlerts();
       expect(res[0].security_vulnerability!.package.name).toBe('friendly-bard');
+    });
+
+    it('handles pagination correctly', async () => {
+      const scope = httpMock.scope(githubApiHost);
+      initRepoMock(scope, 'some/repo');
+
+      scope
+        .get(
+          '/repos/some/repo/dependabot/alerts?state=open&direction=asc&per_page=100',
+        )
+        .reply(
+          200,
+          [
+            {
+              security_advisory: {
+                description: 'description',
+                identifiers: [{ type: 'type', value: 'value' }],
+                references: [],
+              },
+              security_vulnerability: {
+                package: {
+                  ecosystem: 'npm',
+                  name: 'left-pad',
+                },
+                vulnerable_version_range: '0.0.2',
+                first_patched_version: { identifier: '0.0.3' },
+              },
+              dependency: {
+                manifest_path: 'bar/foo',
+              },
+            },
+            {
+              security_advisory: {
+                description: 'description',
+                identifiers: [{ type: 'type', value: 'value' }],
+                references: [],
+              },
+              security_vulnerability: {
+                package: {
+                  ecosystem: 'npm',
+                  name: 'right-pad',
+                },
+                vulnerable_version_range: '0.0.1',
+                first_patched_version: { identifier: '0.0.2' },
+              },
+              dependency: {
+                manifest_path: 'bar/foo',
+              },
+            },
+          ],
+          {
+            link: `<${githubApiHost}/repos/some/repo/dependabot/alerts?state=open&direction=asc&per_page=100&page=2>; rel="next", <${githubApiHost}/repos/some/repo/dependabot/alerts?state=open&direction=asc&per_page=100&page=2>; rel="last"`,
+          },
+        )
+        .get(
+          '/repos/some/repo/dependabot/alerts?state=open&direction=asc&per_page=100&page=2',
+        )
+        .reply(200, [
+          {
+            security_advisory: {
+              description: 'description',
+              identifiers: [{ type: 'type', value: 'value' }],
+              references: [],
+            },
+            security_vulnerability: {
+              package: {
+                ecosystem: 'npm',
+                name: 'center-pad',
+              },
+              vulnerable_version_range: '0.0.3',
+              first_patched_version: { identifier: '0.0.4' },
+            },
+            dependency: {
+              manifest_path: 'bar/foo',
+            },
+          },
+        ]);
+
+      await github.initRepo({ repository: 'some/repo' });
+      const res = await github.getVulnerabilityAlerts();
+
+      expect(res).toHaveLength(3);
+      expect(res[0].security_vulnerability!.package.name).toBe('left-pad');
+      expect(res[1].security_vulnerability!.package.name).toBe('right-pad');
+      expect(res[2].security_vulnerability!.package.name).toBe('center-pad');
     });
   });
 

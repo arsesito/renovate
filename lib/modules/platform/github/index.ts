@@ -42,7 +42,7 @@ import type { HttpResponse } from '../../../util/http/types';
 import { coerceObject } from '../../../util/object';
 import { regEx } from '../../../util/regex';
 import { sanitize } from '../../../util/sanitize';
-import { coerceString, fromBase64, looseEquals } from '../../../util/string';
+import { fromBase64, looseEquals } from '../../../util/string';
 import { ensureTrailingSlash } from '../../../util/url';
 import { incLimitedValue } from '../../../workers/global/limits';
 import type {
@@ -78,9 +78,12 @@ import {
 import { GithubIssueCache, GithubIssue as Issue } from './issue';
 import { massageMarkdownLinks } from './massage-markdown-links';
 import { getPrCache, updatePrCache } from './pr';
-import { VulnerabilityAlertSchema } from './schema';
+import {
+  GithubBranchProtection,
+  GithubBranchRulesets,
+  GithubVulnerabilityAlert,
+} from './schema';
 import type {
-  BranchProtection,
   CombinedBranchStatus,
   Comment,
   GhAutomergeResponse,
@@ -99,7 +102,8 @@ export const id = 'github';
 let config: LocalRepoConfig;
 let platformConfig: PlatformConfig;
 
-const GitHubMaxPrBodyLen = 60000;
+// GitHub's max is 60k but in the hosted app we've observed that content-length is ~1k longer
+const GitHubMaxPrBodyLen = 58000;
 
 export function resetConfigs(): void {
   config = {} as never;
@@ -310,16 +314,40 @@ export async function getRepos(config?: AutodiscoverConfig): Promise<string[]> {
 
 async function getBranchProtection(
   branchName: string,
-): Promise<BranchProtection> {
-  /* v8 ignore start */
+): Promise<GithubBranchProtection> {
   if (config.parentRepo) {
     return {};
-  } /* v8 ignore stop */
-  const res = await githubApi.getJsonUnchecked<BranchProtection>(
+  }
+
+  const res = await githubApi.getJson(
     `repos/${config.repository}/branches/${escapeHash(branchName)}/protection`,
     { cacheProvider: repoCacheProvider },
+    GithubBranchProtection,
   );
   return res.body;
+}
+
+async function getBranchRulesets(
+  branchName: string,
+): Promise<GithubBranchRulesets> {
+  if (config.parentRepo) {
+    return [];
+  }
+
+  try {
+    const res = await githubApi.getJson(
+      `repos/${config.repository}/rules/branches/${escapeHash(branchName)}`,
+      { cacheProvider: repoCacheProvider },
+      GithubBranchRulesets,
+    );
+    return res.body;
+  } catch (err) {
+    if (err.statusCode === 404) {
+      logger.debug(`No branch rulesets found for ${branchName}`);
+      return [];
+    }
+    throw err;
+  }
 }
 
 export async function getRawFile(
@@ -427,7 +455,7 @@ export async function createFork(
         body: {
           organization: forkOrg ?? undefined,
           name: config.parentRepo!.replace('/', '-_-'),
-          default_branch_only: true, // no baseBranches support yet
+          default_branch_only: true, // no baseBranchPatterns support yet
         },
       })
     ).body;
@@ -510,7 +538,7 @@ export async function initRepo({
       variables: {
         owner: config.repositoryOwner,
         name: config.repositoryName,
-        user: renovateUsername,
+        ...(!ignorePrAuthor && { user: renovateUsername }),
       },
       readOnly: true,
     });
@@ -680,31 +708,6 @@ export async function initRepo({
           logger.warn({ err }, 'Could not set default branch');
         } /* v8 ignore stop */
       }
-      // This is a lovely "hack" by GitHub that lets us force update our fork's default branch
-      // with the base commit from the parent repository
-      const url = `repos/${config.repository}/git/refs/heads/${config.defaultBranch}`;
-      const sha = repo.defaultBranchRef.target.oid;
-      try {
-        logger.debug(
-          `Updating forked repository default sha ${sha} to match upstream`,
-        );
-        await githubApi.patchJson(url, {
-          body: {
-            sha,
-            force: true,
-          },
-          token: coerceString(forkToken, opts.token),
-        });
-      } catch (err) /* v8 ignore start */ {
-        logger.warn(
-          { url, sha, err: err.err ?? err },
-          'Error updating fork from upstream - cannot continue',
-        );
-        if (err instanceof ExternalHostError) {
-          throw err;
-        }
-        throw new ExternalHostError(err);
-      } /* v8 ignore stop */
     } else if (forkCreation) {
       logger.debug('Forked repo is not found - attempting to create it');
       forkedRepo = await createFork(forkToken, repository, forkOrg);
@@ -733,9 +736,15 @@ export async function initRepo({
   );
   parsedEndpoint.pathname = `${config.repository}.git`;
   const url = URL.format(parsedEndpoint);
+  let upstreamUrl = undefined;
+  if (forkCreation && config.parentRepo) {
+    parsedEndpoint.pathname = config.parentRepo + '.git';
+    upstreamUrl = URL.format(parsedEndpoint);
+  }
   await git.initRepo({
     ...config,
     url,
+    upstreamUrl,
   });
   const repoConfig: RepoResult = {
     defaultBranch: config.defaultBranch,
@@ -745,37 +754,106 @@ export async function initRepo({
   return repoConfig;
 }
 
+async function checkRulesetsForForceRebase(
+  branchName: string,
+): Promise<boolean> {
+  try {
+    const rulesets = await getBranchRulesets(branchName);
+    logger.trace(
+      `Ruleset: Found ${rulesets.length} rulesets for branch ${branchName}`,
+    );
+
+    return rulesets.some((rule) => {
+      if (
+        rule.type === 'required_status_checks' &&
+        rule.parameters?.strict_required_status_checks_policy === true
+      ) {
+        logger.debug(
+          `Ruleset: strict required status checks found for ${branchName}`,
+        );
+        return true;
+      }
+
+      return false;
+    });
+  } catch (err) {
+    handleBranchProtectionError('rulesets', err, branchName);
+    return false;
+  }
+}
+
+async function checkBranchProtectionForForceRebase(
+  branchName: string,
+): Promise<boolean> {
+  try {
+    const branchProtection = await getBranchProtection(branchName);
+    logger.trace(`Found branch protection for branch ${branchName}`);
+
+    const strictStatusChecks = branchProtection?.required_status_checks?.strict;
+    if (strictStatusChecks) {
+      logger.debug(
+        `Branch protection: PRs must be up-to-date before merging for ${branchName}`,
+      );
+      return true;
+    }
+    return false;
+  } catch (err) {
+    handleBranchProtectionError('branch-protection', err, branchName);
+    return false;
+  }
+}
+
 export async function getBranchForceRebase(
   branchName: string,
 ): Promise<boolean> {
   config.branchForceRebase ??= {};
-  if (config.branchForceRebase[branchName] === undefined) {
-    try {
-      config.branchForceRebase[branchName] = false;
-      const branchProtection = await getBranchProtection(branchName);
-      logger.debug(`Found branch protection for branch ${branchName}`);
-      if (branchProtection?.required_status_checks?.strict) {
-        logger.debug(
-          `Branch protection: PRs must be up-to-date before merging for ${branchName}`,
-        );
-        config.branchForceRebase[branchName] = true;
-      }
-    } catch (err) {
-      if (err.statusCode === 404) {
-        logger.debug(`No branch protection found for ${branchName}`);
-      } else if (
-        err.message === PLATFORM_INTEGRATION_UNAUTHORIZED ||
-        err.statusCode === 403
-      ) {
-        logger.once.debug(
-          'Branch protection: Do not have permissions to detect branch protection',
-        );
-      } else {
-        throw err;
-      }
-    }
+
+  const cachedResult = config.branchForceRebase[branchName];
+  if (cachedResult !== undefined) {
+    return cachedResult;
   }
-  return !!config.branchForceRebase[branchName];
+
+  // Initialize to false before checking branch protection
+  config.branchForceRebase[branchName] = false;
+
+  // Check rulesets first (newer API)
+  const hasRulesetForceRebase = await checkRulesetsForForceRebase(branchName);
+  if (hasRulesetForceRebase) {
+    config.branchForceRebase[branchName] = true;
+    return true;
+  }
+
+  // Fall back to legacy branch protection
+  const hasBranchProtectionForceRebase =
+    await checkBranchProtectionForForceRebase(branchName);
+  if (hasBranchProtectionForceRebase) {
+    config.branchForceRebase[branchName] = true;
+  }
+
+  return config.branchForceRebase[branchName];
+}
+
+function handleBranchProtectionError(
+  protection: 'branch-protection' | 'rulesets',
+  err: any,
+  branchName: string,
+): void {
+  if (err.statusCode === 404) {
+    logger.debug(`No ${protection} found for ${branchName}`);
+    return;
+  }
+
+  const isUnauthorized =
+    err.message === PLATFORM_INTEGRATION_UNAUTHORIZED || err.statusCode === 403;
+
+  if (isUnauthorized) {
+    logger.once.debug(
+      `Branch protection: Do not have permissions to detect ${protection} for ${branchName}`,
+    );
+    return;
+  }
+
+  throw err;
 }
 
 function cachePr(pr?: GhPr | null): void {
@@ -835,10 +913,12 @@ function matchesState(state: string, desiredState: string): boolean {
 export async function getPrList(): Promise<GhPr[]> {
   if (!config.prList) {
     const repo = config.parentRepo ?? config.repository;
-    const username =
-      !config.forkToken && !config.ignorePrAuthor && config.renovateUsername
-        ? config.renovateUsername
-        : null;
+
+    let username = config.renovateUsername;
+    if (config.forkToken || config.ignorePrAuthor) {
+      username = undefined;
+    }
+
     // TODO: check null `repo` (#22198)
     const prCache = await getPrCache(githubApi, repo!, username);
     config.prList = Object.values(prCache).sort(
@@ -956,6 +1036,7 @@ export async function getBranchPr(branchName: string): Promise<GhPr | null> {
 
 export async function tryReuseAutoclosedPr(
   autoclosedPr: Pr,
+  newTitle: string,
 ): Promise<Pr | null> {
   const { sha, number, sourceBranch: branchName } = autoclosedPr;
   try {
@@ -970,21 +1051,28 @@ export async function tryReuseAutoclosedPr(
   }
 
   try {
-    const title = autoclosedPr.title.replace(regEx(/ - autoclosed$/), '');
     const { body: ghPr } = await githubApi.patchJson<GhRestPr>(
       `repos/${config.repository}/pulls/${number}`,
       {
         body: {
           state: 'open',
-          title,
+          title: newTitle,
         },
       },
     );
     logger.info(
-      { branchName, title, number },
+      { branchName, oldTitle: autoclosedPr.title, newTitle, number },
       'Successfully reopened autoclosed PR',
     );
+
     const result = coerceRestPr(ghPr);
+
+    const localSha = git.getBranchCommit(branchName);
+    if (localSha && localSha !== sha) {
+      await git.forcePushToRemote(branchName, 'origin');
+      result.sha = localSha;
+    }
+
     cachePr(result);
     return result;
   } catch {
@@ -1344,7 +1432,7 @@ export async function ensureIssue({
         logger.debug('Issue is open and up to date - nothing to do');
         return null;
       }
-      if (shouldReOpen) {
+      if (shouldReOpen || issue.state === 'open') {
         logger.debug('Patching issue');
         const data: Record<string, unknown> = { body, state: 'open', title };
         if (labels) {
@@ -1966,10 +2054,10 @@ export function massageMarkdown(input: string): string {
       regEx(/]: https:\/\/github\.com\//g),
       ']: https://redirect.github.com/',
     )
-    .replace('> ℹ **Note**\n> \n', '> [!NOTE]\n')
-    .replace('> ⚠ **Warning**\n> \n', '> [!WARNING]\n')
-    .replace('> ⚠️ **Warning**\n> \n', '> [!WARNING]\n')
-    .replace('> ❗ **Important**\n> \n', '> [!IMPORTANT]\n');
+    .replaceAll('> ℹ **Note**\n> \n', '> [!NOTE]\n')
+    .replaceAll('> ⚠ **Warning**\n> \n', '> [!WARNING]\n')
+    .replaceAll('> ⚠️ **Warning**\n> \n', '> [!WARNING]\n')
+    .replaceAll('> ❗ **Important**\n> \n', '> [!IMPORTANT]\n');
   return smartTruncate(massagedInput, maxBodyLength());
 }
 
@@ -1989,11 +2077,11 @@ export async function getVulnerabilityAlerts(): Promise<VulnerabilityAlert[]> {
       await githubApi.getJson(
         `/repos/${config.repositoryOwner}/${config.repositoryName}/dependabot/alerts?state=open&direction=asc&per_page=100`,
         {
-          paginate: false,
+          paginate: true,
           headers: { accept: 'application/vnd.github+json' },
           cacheProvider: repoCacheProvider,
         },
-        VulnerabilityAlertSchema,
+        GithubVulnerabilityAlert,
       )
     ).body;
   } catch (err) /* v8 ignore start */ {

@@ -57,7 +57,7 @@ export async function wrapWithRetry<T>(
       );
 
       const delay = Promise.all([
-        hostDelays.get(key),
+        hostDelays.get(key) ?? Promise.resolve(),
         setTimeout(1000 * delaySeconds),
       ]);
       hostDelays.set(key, delay);
@@ -102,7 +102,7 @@ export function getRetryAfter(err: unknown): number | null {
     return seconds;
   }
 
-  const seconds = parseInt(retryAfter, 10);
+  const seconds = parseInt(retryAfter);
   if (!Number.isNaN(seconds) && seconds >= 0) {
     return seconds;
   }

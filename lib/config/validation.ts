@@ -16,7 +16,7 @@ import {
   hasValidSchedule,
   hasValidTimezone,
 } from '../workers/repository/update/branch/schedule';
-import { configFileNames } from './app-strings';
+import { getConfigFileNames } from './app-strings';
 import { GlobalConfig } from './global';
 import { migrateConfig } from './migration';
 import { getOptions } from './options';
@@ -31,7 +31,6 @@ import type {
   ValidationResult,
 } from './types';
 import { allowedStatusCheckStrings } from './types';
-import * as managerValidator from './validation-helpers/managers';
 import * as matchBaseBranchesValidator from './validation-helpers/match-base-branches';
 import * as regexOrGlobValidator from './validation-helpers/regex-glob-matchers';
 import {
@@ -75,13 +74,6 @@ const ignoredNodes = [
 ];
 const tzRe = regEx(/^:timezone\((.+)\)$/);
 const rulesRe = regEx(/p.*Rules\[\d+\]$/);
-
-function isManagerPath(parentPath: string): boolean {
-  return (
-    regEx(/^customManagers\[[0-9]+]$/).test(parentPath) ||
-    managerList.includes(parentPath)
-  );
-}
 
 function isIgnored(key: string): boolean {
   return ignoredNodes.includes(key);
@@ -221,19 +213,6 @@ export async function validateConfig(
         });
       }
     }
-    if (key === 'managerFilePatterns') {
-      if (parentPath === undefined) {
-        errors.push({
-          topic: 'Config error',
-          message: `"managerFilePatterns" may not be defined at the top level of a config and must instead be within a manager block`,
-        });
-      } else if (!isManagerPath(parentPath)) {
-        warnings.push({
-          topic: 'Config warning',
-          message: `"managerFilePatterns" must be configured in a manager block and not here: ${parentPath}`,
-        });
-      }
-    }
     if (
       !isIgnored(key) && // We need to ignore some reserved keys
       !(is as any).function(val) // Ignore all functions
@@ -271,9 +250,8 @@ export async function validateConfig(
         !optionParents[key].includes(parentName as AllowedParents)
       ) {
         // TODO: types (#22198)
-        const message = `${key} should only be configured within one of "${optionParents[
-          key
-        ]?.join(' or ')}" objects. Was found in ${parentName}`;
+        const options = optionParents[key]?.sort().join(', ');
+        const message = `"${key}" can't be used in "${parentName}". Allowed objects: ${options}.`;
         warnings.push({
           topic: `${parentPath ? `${parentPath}.` : ''}${key}`,
           message,
@@ -414,14 +392,11 @@ export async function validateConfig(
                       ),
                     ],
                   }).migratedConfig.packageRules![0];
-                  errors.push(
-                    ...managerValidator.check({ resolvedRule, currentPath }),
-                  );
                   warnings.push(
                     ...matchBaseBranchesValidator.check({
                       resolvedRule,
                       currentPath: `${currentPath}[${subIndex}]`,
-                      baseBranches: config.baseBranches!,
+                      baseBranchPatterns: config.baseBranchPatterns!,
                     }),
                   );
                   const selectorLength = Object.keys(resolvedRule).filter(
@@ -578,15 +553,15 @@ export async function validateConfig(
                 }
               }
             }
-            if (key === 'baseBranches') {
-              for (const baseBranch of val as string[]) {
+            if (key === 'baseBranchPatterns') {
+              for (const baseBranchPattern of val as string[]) {
                 if (
-                  isRegexMatch(baseBranch) &&
-                  !getRegexPredicate(baseBranch)
+                  isRegexMatch(baseBranchPattern) &&
+                  !getRegexPredicate(baseBranchPattern)
                 ) {
                   errors.push({
                     topic: 'Configuration Error',
-                    message: `Invalid regExp for ${currentPath}: \`${baseBranch}\``,
+                    message: `Invalid regExp for ${currentPath}: \`${baseBranchPattern}\``,
                   });
                 }
               }
@@ -841,11 +816,11 @@ async function validateGlobalConfig(
       if (is.string(val)) {
         if (
           key === 'onboardingConfigFileName' &&
-          !configFileNames.includes(val)
+          !getConfigFileNames().includes(val)
         ) {
           warnings.push({
             topic: 'Configuration Error',
-            message: `Invalid value \`${val}\` for \`${currentPath}\`. The allowed values are ${configFileNames.join(', ')}.`,
+            message: `Invalid value \`${val}\` for \`${currentPath}\`. The allowed values are ${getConfigFileNames().join(', ')}.`,
           });
         } else if (
           key === 'repositoryCache' &&
