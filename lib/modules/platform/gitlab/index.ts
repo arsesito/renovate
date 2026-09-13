@@ -663,7 +663,9 @@ async function approveMr(mrNumber: number): Promise<void> {
     opts.token = env.RENOVATE_X_GITLAB_AUTO_APPROVE_TOKEN;
   }
   logger.debug(`approveMr(${mrNumber})`);
+async function autoApproveMr(mrNumber: number): Promise<void> {
   try {
+    logger.debug(`Auto-approving MR ${mrNumber}`);
     await gitlabApi.postJson(
       `projects/${config.repository}/merge_requests/${mrNumber}/approve`,
       opts,
@@ -714,6 +716,7 @@ export async function createPr({
 
   if (platformPrOptions?.autoApprove) {
     await approveMr(pr.number);
+    await autoApproveMr(pr.number);
   }
 
   await tryPrAutomerge(pr.number, platformPrOptions);
@@ -784,6 +787,7 @@ export async function updatePr({
 
   if (platformPrOptions?.autoApprove) {
     await approveMr(iid);
+    await autoApproveMr(iid);
   }
 }
 
